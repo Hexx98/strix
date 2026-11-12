@@ -50,6 +50,26 @@ _CODE_LOCATION_FIELDS = (
 )
 
 
+# One ordered step in a finding's reproduction sequence. ``action`` is the
+# human narrative of what was done; ``command`` is the exact command / request /
+# script run; ``output`` is the observed result; ``screenshot`` is the bare
+# filename of a PNG the agent saved in the sandbox screenshot dir as proof.
+_EVIDENCE_STEP_FIELDS = (
+    "action",
+    "command",
+    "command_lang",
+    "output",
+    "screenshot",
+)
+
+_MAX_EVIDENCE_STEPS = 60
+_MAX_EVIDENCE_ACTION_CHARS = 2000
+_SCREENSHOT_NAME_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.(?:png|jpg|jpeg|webp|gif)$",
+    re.IGNORECASE,
+)
+
+
 def _validate_file_path(path: str) -> str | None:
     if not path or not path.strip():
         return "file path cannot be empty"
@@ -108,6 +128,76 @@ def _validate_code_locations(locations: list[dict[str, Any]]) -> list[str]:
         elif isinstance(start, int) and end < start:
             errors.append(f"code_locations[{i}]: end_line ({end}) must be >= start_line ({start})")
     return errors
+
+
+def _normalize_evidence_screenshot(value: Any) -> tuple[str | None, bool]:
+    """Resolve a step's screenshot to a safe bare filename.
+
+    Returns ``(basename, ok)``. ``basename`` is set only for a valid image
+    filename; ``ok`` is False when a value was supplied but is not an acceptable
+    image filename (so the caller can raise one error), and True when absent.
+    """
+    if not value or not str(value).strip():
+        return None, True
+    base = PurePosixPath(str(value).strip()).name
+    if _SCREENSHOT_NAME_RE.match(base):
+        return base, True
+    return None, False
+
+
+def _normalize_evidence_steps(
+    raw: object,
+) -> tuple[list[dict[str, Any]] | None, list[str]]:
+    """Normalize the ordered reproduction sequence attached to a finding.
+
+    Each step records one action taken to prove the finding: what was done
+    (``action``), the exact command/request run (``command`` with an optional
+    ``command_lang`` fence hint), the observed result (``output``), and the base
+    filename of a screenshot saved in the sandbox screenshot dir (``screenshot``)
+    as proof. The sequence renders in order in the finding markdown and exports
+    one evidence entry per step. A screenshot must be a bare image filename with
+    no path component, so it resolves safely against the exported screenshot
+    directory and can never point outside it.
+    """
+    if raw is None:
+        return None, []
+    if not isinstance(raw, list):
+        return None, ["evidence_steps must be a list of step objects"]
+
+    cleaned: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for i, step in enumerate(raw):
+        if not isinstance(step, dict):
+            errors.append(f"evidence_steps[{i}] must be an object")
+            continue
+        action = str(step.get("action") or "").strip()
+        if not action:
+            errors.append(f"evidence_steps[{i}]: action is required")
+            continue
+        normalized: dict[str, Any] = {"action": action[:_MAX_EVIDENCE_ACTION_CHARS]}
+        for field in ("command", "output"):
+            value = step.get(field)
+            if value is None:
+                continue
+            text = str(value).strip("\n")
+            if text:
+                normalized[field] = text
+        lang = step.get("command_lang")
+        if lang and str(lang).strip():
+            normalized["command_lang"] = str(lang).strip().lower()[:32]
+        shot_name, shot_ok = _normalize_evidence_screenshot(step.get("screenshot"))
+        if shot_name:
+            normalized["screenshot"] = shot_name
+        elif not shot_ok:
+            errors.append(
+                f"evidence_steps[{i}]: screenshot must be an image filename "
+                f"(png/jpg/jpeg/webp/gif) with no path, got {step.get('screenshot')!r}"
+            )
+        cleaned.append(normalized)
+        if len(cleaned) > _MAX_EVIDENCE_STEPS:
+            errors.append(f"evidence_steps can contain at most {_MAX_EVIDENCE_STEPS} steps")
+            break
+    return (cleaned or None), errors
 
 
 def _extract_cve(cve: str) -> str:
@@ -468,6 +558,12 @@ def _collect_update_changes(  # noqa: PLR0912, PLR0915
     if raw_http_exchange_ids is not None and not http_exchange_errors:
         changes["http_exchange_ids"] = http_exchange_ids or []
 
+    raw_evidence_steps = fields.get("evidence_steps")
+    evidence_steps, evidence_step_errors = _normalize_evidence_steps(raw_evidence_steps)
+    errors.extend(evidence_step_errors)
+    if raw_evidence_steps is not None and not evidence_step_errors:
+        changes["evidence_steps"] = evidence_steps or []
+
     return changes, errors
 
 
@@ -803,6 +899,7 @@ async def _do_create(
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    evidence_steps: list[dict[str, Any]] | None = None,
     agent_id: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
@@ -849,6 +946,9 @@ async def _do_create(
         http_exchange_ids
     )
     errors.extend(http_exchange_errors)
+
+    normalized_evidence_steps, evidence_step_errors = _normalize_evidence_steps(evidence_steps)
+    errors.extend(evidence_step_errors)
 
     if errors:
         return {"success": False, "error": "Validation failed", "errors": errors}
@@ -911,6 +1011,7 @@ async def _do_create(
             "fix_verification": fix_verification,
             "fix_pr_body": fix_pr_body,
             "http_exchange_ids": normalized_http_exchange_ids,
+            "evidence_steps": normalized_evidence_steps,
         }
 
         dedupe = await check_duplicate(candidate, existing)
@@ -1005,6 +1106,7 @@ async def create_vulnerability_report(
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    evidence_steps: list[dict[str, Any]] | None = None,
 ) -> str:
     """File a vulnerability report — one report per fully-verified finding.
 
@@ -1262,6 +1364,21 @@ async def create_vulnerability_report(
         evidence: Concrete proof the issue is real and exploitable —
             request/response excerpts, observed behavior, tool output.
             Use fenced code blocks; no internal identifiers/paths.
+        evidence_steps: The ordered reproduction sequence — the exact
+            path you walked to prove this finding, as a list of step
+            objects in the order you performed them. Each step is
+            ``{"action": "...", "command": "...", "command_lang": "...",
+            "output": "...", "screenshot": "..."}``. ``action`` (required)
+            is the plain-language description of what you did; ``command``
+            is the exact request, command, or script you ran; ``output``
+            is the response or result you observed; ``command_lang`` is a
+            fence hint (``bash``/``http``/``python``/``sql``/...); and
+            ``screenshot`` is the BARE filename (no path) of a PNG you
+            saved in the browser screenshot dir that proves the step —
+            capture one at the moment of successful exploitation. Omit
+            any optional field that does not apply. This is what builds a
+            replayable, evidence-backed finding; include it whenever the
+            finding was proven through a sequence of actions.
         assumptions: Short note on the assumptions/prerequisites that
             make this finding impactful or exploitable (e.g. "assumes an
             authenticated low-privilege user").
@@ -1454,6 +1571,7 @@ async def create_vulnerability_report(
         http_exchange_ids=http_exchange_ids,
         fix_verification=fix_verification,
         fix_pr_body=fix_pr_body,
+        evidence_steps=evidence_steps,
         agent_id=agent_id,
         agent_name=agent_name,
     )
@@ -1489,6 +1607,7 @@ async def update_vulnerability_report(
     http_exchange_ids: list[str] | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    evidence_steps: list[dict[str, Any]] | None = None,
     contextual_cvss_reasoning: str | None = None,
 ) -> str:
     """Revise a vulnerability report that is already filed, keeping its id.
@@ -1561,6 +1680,10 @@ async def update_vulnerability_report(
         code_locations: Replacement code locations.
         http_exchange_ids: Replacement proxy request ids. Pass an empty
             list to remove all linked exchanges.
+        evidence_steps: Replacement reproduction sequence. Replaces the
+            whole ordered list; pass an empty list to remove it. Same step
+            shape as ``create_vulnerability_report`` — attach this after
+            filing once you have walked and captured the full proof path.
         fix_verification: Verification statement for an applyable fix.
         fix_pr_body: Replacement fix PR body.
         contextual_cvss_reasoning: Dependency findings only. What you
@@ -1608,6 +1731,7 @@ async def update_vulnerability_report(
         "http_exchange_ids": http_exchange_ids,
         "fix_verification": fix_verification,
         "fix_pr_body": fix_pr_body,
+        "evidence_steps": evidence_steps,
         "contextual_cvss_reasoning": contextual_cvss_reasoning,
     }
     if http_exchange_warning and all(value is None for value in fields.values()):

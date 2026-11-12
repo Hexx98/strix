@@ -138,6 +138,23 @@ def _note_exit_reason(reason: str) -> None:
         report_state.scan_ended_exit_reason = reason
 
 
+def _cited_exchange_ids() -> list[str]:
+    """Collect the ``http_exchange_ids`` every finding cites, de-duplicated.
+
+    These are the proxy exchanges worth preserving from the Caido project
+    before it is dropped at teardown; order is kept for a stable export.
+    """
+    report_state = get_global_report_state()
+    if report_state is None:
+        return []
+    ordered: dict[str, None] = {}
+    for report in report_state.get_existing_vulnerabilities():
+        for raw_id in report.get("http_exchange_ids") or []:
+            if isinstance(raw_id, str) and raw_id.strip():
+                ordered.setdefault(raw_id.strip(), None)
+    return list(ordered)
+
+
 def _persist_mcp_status(roster: list[dict[str, Any]]) -> None:
     """Write the run's non-secret MCP connection status roster to run.json.
 
@@ -725,6 +742,11 @@ async def run_strix_scan(
         with contextlib.suppress(Exception):
             await coordinator._maybe_snapshot()
         if cleanup_on_exit:
+            # Pull screenshots and cited proxy exchanges out while the sandbox
+            # and its Caido project are still alive; both are destroyed by the
+            # teardown below. Best-effort — never let it block cleanup.
+            with contextlib.suppress(Exception):
+                await session_manager.export_evidence(scan_id, run_dir, _cited_exchange_ids())
             logger.info("Tearing down sandbox session for scan %s", scan_id)
             await session_manager.cleanup(scan_id)
         logger.info("Strix scan %s done", scan_id)
