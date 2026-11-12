@@ -22,6 +22,7 @@ from strix.runtime.backends import backend_supports_bind_mounts, get_backend
 from strix.runtime.caido_bootstrap import bootstrap_caido
 from strix.runtime.caido_handle import CaidoBootstrapHandle
 from strix.runtime.deferred_session import DeferredSandboxClient, DeferredSandboxSession
+from strix.runtime.evidence_export import export_scan_evidence
 
 
 if TYPE_CHECKING:
@@ -437,6 +438,30 @@ async def _discard_session(client: Any, session: Any) -> None:
         await client.delete(session)
     except Exception:  # noqa: BLE001
         logger.warning("Discarding a half-started sandbox session failed", exc_info=True)
+
+
+async def export_evidence(scan_id: str, run_dir: Path, request_ids: list[str]) -> None:
+    """Pull screenshots and cited HTTP exchanges out before teardown.
+
+    Reads (does not remove) the cached session bundle for ``scan_id`` so
+    :func:`cleanup` still owns the one teardown. Best-effort: any failure is
+    logged and swallowed — evidence export must never block a scan from
+    finishing or the next scan from starting.
+    """
+    bundle = _SESSION_CACHE.get(scan_id)
+    if bundle is None:
+        logger.debug("export_evidence(%s): no cached session", scan_id)
+        return
+
+    try:
+        await export_scan_evidence(
+            bundle.get("session"),
+            bundle.get("caido_client"),
+            run_dir,
+            request_ids,
+        )
+    except Exception:  # noqa: BLE001 - export is best-effort; teardown continues.
+        logger.warning("export_evidence(%s) failed", scan_id, exc_info=True)
 
 
 async def cleanup(scan_id: str) -> None:

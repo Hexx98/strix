@@ -290,6 +290,8 @@ ignore = [
 # on first proxy call instead of at module scope (keeps it off the launch path).
 "strix/tools/proxy/caido_api.py" = ["PLC0415"]
 "strix/runtime/caido_bootstrap.py" = ["PLC0415"]
+# Evidence export defers the heavy caido_api import to teardown-time only.
+"strix/runtime/evidence_export.py" = ["PLC0415"]
 "strix/tools/agents_graph/tools.py" = ["TC002"]
 "strix/agents/factory.py" = ["TC002"]
 # Entry point: ``Path`` is used at runtime by the typing of the
