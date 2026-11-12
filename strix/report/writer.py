@@ -220,6 +220,61 @@ def atomic_write_text(path: Path, payload: str) -> None:
     tmp_path.replace(path)
 
 
+# Per-finding markdown lives in ``run_dir/vulnerabilities/``; exported
+# screenshots live in ``run_dir/evidence/screenshots/``. The relative hop from
+# one to the other is therefore a single level up.
+_EVIDENCE_SCREENSHOT_REL = "../evidence/screenshots"
+
+
+def render_evidence_steps(steps: Any) -> list[str]:
+    """Render the ordered reproduction sequence as a numbered evidence section.
+
+    Each step shows what was done, the exact command/request (fenced), the
+    observed result, and an embedded screenshot when one was captured. The image
+    reference points at the exported screenshot directory, which the evidence
+    export writes at run end; until then the link simply resolves to nothing.
+    """
+    if not isinstance(steps, list):
+        return []
+    lines: list[str] = ["## Reproduction Steps\n"]
+    rendered = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        rendered += 1
+        action = str(step.get("action") or "").strip()
+        lines.append(f"**{rendered}. {action}**" if action else f"**Step {rendered}**")
+        lines.append("")
+        command = step.get("command")
+        if command:
+            code = str(command)
+            lang = str(step.get("command_lang") or "").strip()
+            fence = safe_fence(code)
+            lines.append(f"{fence}{lang}")
+            lines.append(code)
+            lines.append(fence)
+            lines.append("")
+        output = step.get("output")
+        if output:
+            out = str(output)
+            fence = safe_fence(out)
+            lines.append("_Observed:_")
+            lines.append("")
+            lines.append(fence)
+            lines.append(out)
+            lines.append(fence)
+            lines.append("")
+        screenshot = step.get("screenshot")
+        if screenshot:
+            name = str(screenshot).strip()
+            alt = action or f"step {rendered}"
+            lines.append(f"![{alt}]({_EVIDENCE_SCREENSHOT_REL}/{name})")
+            lines.append("")
+    if rendered == 0:
+        return []
+    return lines
+
+
 def render_vulnerability_md(report: dict[str, Any]) -> str:  # noqa: PLR0912, PLR0915
     lines: list[str] = [
         f"# {report.get('title', 'Untitled Vulnerability')}\n",
@@ -267,6 +322,9 @@ def render_vulnerability_md(report: dict[str, Any]) -> str:  # noqa: PLR0912, PL
         lines.append("## Evidence\n")
         lines.append(str(report["evidence"]))
         lines.append("")
+
+    if report.get("evidence_steps"):
+        lines.extend(render_evidence_steps(report["evidence_steps"]))
 
     if report.get("impact"):
         lines.append("## Impact\n")
