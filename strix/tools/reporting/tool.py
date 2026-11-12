@@ -146,7 +146,7 @@ def _normalize_evidence_screenshot(value: Any) -> tuple[str | None, bool]:
 
 
 def _normalize_evidence_steps(
-    raw: list[dict[str, Any]] | None,
+    raw: object,
 ) -> tuple[list[dict[str, Any]] | None, list[str]]:
     """Normalize the ordered reproduction sequence attached to a finding.
 
