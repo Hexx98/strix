@@ -291,6 +291,24 @@ agent-browser screenshot --full                 # full scroll height
 agent-browser screenshot --annotate             # numbered labels + legend keyed to snapshot refs
 ```
 
+#### Capturing exploit proof for a finding
+
+When a step of an exploit succeeds, screenshot the decisive result as replayable
+proof for the report. Give it a descriptive name **inside the screenshot
+directory** and reference that **bare filename** in the finding's
+`evidence_steps[].screenshot`:
+
+```bash
+agent-browser screenshot /workspace/.agent-browser-screenshots/idor-admin-200.png
+# then in the report, that step carries:  "screenshot": "idor-admin-200.png"
+```
+
+Everything written to that directory is exported with the run, so a reference by
+filename still resolves in the finished report after the sandbox is gone. Capture
+the moment that proves impact — the admin page you should not see, the alert that
+fired, the record you should not be able to read — not a generic page shot. The
+report takes only the filename (no path); keep the file in the screenshot dir.
+
 {% if supports_images %}
 `--annotate` is designed for multimodal models: each label `[N]` maps
 to ref `@eN`. Take the annotated screenshot, then ``view_image`` it,
